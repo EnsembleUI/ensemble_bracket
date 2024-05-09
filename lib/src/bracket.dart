@@ -53,6 +53,10 @@ class RoundData {
 }
 
 class BracketController extends EnsembleBoxController {
+  EdgeInsets? tabPadding;
+
+  double tabGap = 12;
+
   BracketController();
 
   RoundTemplate? roundTemplate;
@@ -92,6 +96,8 @@ class BracketController extends EnsembleBoxController {
         tabTextStyle = Utils.getTextStyle(data['textStyle']);
         tabSelectedStyle = Utils.getTextStyle(data['selectedTextStyle']);
         tabBorderRadius = Utils.getBorderRadius(data['borderRadius']);
+        tabPadding = Utils.optionalInsets(data['padding']);
+        tabGap = Utils.getDouble(data['gap'], fallback: 12.0);
       },
       'items': (data) {
         if (!_isValidData(data)) return;
@@ -199,13 +205,17 @@ class BracketsView extends StatefulWidget {
 
 class _BracketsViewState extends State<BracketsView> {
   late PageController _pageController;
+  late ScrollController _tabScrollController;
   int _currentPageIndex = 0;
+  List<GlobalKey> _tabKeys = [];
 
   @override
   void initState() {
     super.initState();
     _pageController = PageController(viewportFraction: 0.75);
     _pageController.addListener(_updatePageIndex);
+    _tabKeys =
+        List<GlobalKey>.generate(widget.data.length, (index) => GlobalKey());
   }
 
   void _updatePageIndex() {
@@ -214,6 +224,17 @@ class _BracketsViewState extends State<BracketsView> {
       setState(() {
         _currentPageIndex = newPage;
       });
+    }
+    _scrollToSelectedTab(newPage);
+  }
+
+  void _scrollToSelectedTab(int index) {
+    if (index < _tabKeys.length) {
+      Scrollable.ensureVisible(
+        _tabKeys[index].currentContext!,
+        duration: const Duration(milliseconds: 300),
+        alignment: 0.5,
+      );
     }
   }
 
@@ -229,6 +250,7 @@ class _BracketsViewState extends State<BracketsView> {
   void dispose() {
     _pageController.removeListener(_updatePageIndex);
     _pageController.dispose();
+    _tabScrollController.dispose();
     super.dispose();
   }
 
@@ -238,16 +260,23 @@ class _BracketsViewState extends State<BracketsView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SingleChildScrollView(
+          padding: EdgeInsets.zero,
           scrollDirection: Axis.horizontal,
           child: Row(
+            mainAxisAlignment: MainAxisAlignment.start,
             children: List.generate(widget.data.length, (index) {
               bool isSelected = index == _currentPageIndex;
               String? title = widget.data.elementAt(index).title;
-              return Padding(
-                padding: const EdgeInsets.all(8.0),
+              return Container(
+                padding: EdgeInsets.only(left: widget.controller.tabGap),
                 child: ElevatedButton(
-                  onPressed: () => _animateToPage(index),
+                  key: _tabKeys[index],
+                  onPressed: () {
+                    _animateToPage(index);
+                    _scrollToSelectedTab(index);
+                  },
                   style: ElevatedButton.styleFrom(
+                    padding: widget.controller.tabPadding,
                     shape: widget.controller.tabBorderRadius != null
                         ? RoundedRectangleBorder(
                             borderRadius:
@@ -297,32 +326,69 @@ class BracketsPage extends StatefulWidget {
   State<BracketsPage> createState() => _BracketsPageState();
 }
 
+class CustomScrollNotification extends Notification {
+  final double scrollPosition;
+  final double maxScrollExtent;
+  final double visibleHeight;
+
+  CustomScrollNotification(
+      this.scrollPosition, this.maxScrollExtent, this.visibleHeight);
+}
+
 class _BracketsPageState extends State<BracketsPage> {
   int _prevColumnIndex = 0;
+  late List<ScrollController> _scrollControllers;
 
-  void _onPageChanged(int index) {
+  @override
+  void initState() {
+    super.initState();
+    _scrollControllers =
+        List.generate(widget.data.length, (index) => ScrollController());
+  }
+
+  void _onPageChanged(int index) async {
+    _scrollControllers[index].animateTo(0.0,
+        duration: const Duration(milliseconds: 600), curve: Curves.decelerate);
+    _scrollControllers[index].animateTo(0.1,
+        duration: const Duration(milliseconds: 10), curve: Curves.decelerate);
+
     setState(() {
       _prevColumnIndex = index;
     });
   }
 
   @override
+  void dispose() {
+    for (var controller in _scrollControllers) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return PageView.builder(
-      padEnds: false,
-      controller: widget.pageController,
-      itemCount: widget.data.length,
-      onPageChanged: _onPageChanged,
-      itemBuilder: (context, columnIndex) {
-        final roundData = widget.data[columnIndex];
-        return BracketsColumnPage(
-          controller: widget.controller,
-          roundData: roundData,
-          columnIndex: columnIndex,
-          prevColumnIndex: _prevColumnIndex,
-          totalColumns: widget.data.length,
-        );
+    return NotificationListener<CustomScrollNotification>(
+      onNotification: (CustomScrollNotification notification) {
+        int currentPage = widget.pageController.page?.round() ?? 0;
+        _scrollControllers[currentPage + 1].jumpTo(notification.scrollPosition);
+        return true;
       },
+      child: PageView.builder(
+        padEnds: false,
+        controller: widget.pageController,
+        itemCount: widget.data.length,
+        onPageChanged: _onPageChanged,
+        itemBuilder: (context, columnIndex) {
+          return BracketsColumnPage(
+            controller: widget.controller,
+            roundData: widget.data[columnIndex],
+            columnIndex: columnIndex,
+            prevColumnIndex: _prevColumnIndex,
+            totalColumns: widget.data.length,
+            scrollController: _scrollControllers[columnIndex],
+          );
+        },
+      ),
     );
   }
 }
@@ -333,6 +399,7 @@ class BracketsColumnPage extends StatefulWidget {
   final int prevColumnIndex;
   final int totalColumns;
   final BracketController controller;
+  final ScrollController scrollController;
 
   const BracketsColumnPage({
     super.key,
@@ -341,6 +408,7 @@ class BracketsColumnPage extends StatefulWidget {
     required this.prevColumnIndex,
     required this.totalColumns,
     required this.controller,
+    required this.scrollController,
   });
 
   @override
@@ -361,46 +429,73 @@ class _BracketsColumnPageState extends State<BracketsColumnPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      children: computedMatches.asMap().entries.map((entry) {
-        final matchIndex = entry.key;
-        final matchData = entry.value;
+    bool isNextColumn = widget.columnIndex == widget.prevColumnIndex + 1;
 
-        double topOffset = matchIndex * matchCardHeight;
-        if (widget.prevColumnIndex < widget.columnIndex) {
-          topOffset = topOffset + (matchCardHeight / 2);
-          topOffset = topOffset + (matchCardHeight * matchIndex);
+    return NotificationListener(
+      onNotification: (ScrollNotification notification) {
+        if (notification is ScrollUpdateNotification) {
+          double visibleHeight = notification.metrics.viewportDimension;
+          CustomScrollNotification(
+            notification.metrics.pixels,
+            notification.metrics.maxScrollExtent,
+            visibleHeight,
+          ).dispatch(context);
         }
+        return true;
+      },
+      child: SingleChildScrollView(
+        scrollDirection: Axis.vertical,
+        physics: const ClampingScrollPhysics(),
+        controller: widget.scrollController,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            ...computedMatches.asMap().entries.map((entry) {
+              final matchIndex = entry.key;
+              final matchData = entry.value;
 
-        widget.roundData.localScope.dataContext
-            .addDataContextById(widget.roundData.matches.name, matchData);
+              double topOffset = 0;
+              if (widget.prevColumnIndex < widget.columnIndex) {
+                topOffset = topOffset + (matchCardHeight / 2);
+                if (matchIndex > 0) {
+                  topOffset = topOffset + matchCardHeight / 2;
+                }
+              }
 
-        final cellWidget = widget.roundData.localScope
-            .buildWidgetFromDefinition(widget.roundData.matches.template);
-        return AnimatedPositioned(
-          height: matchCardHeight,
-          width: MediaQuery.of(context).size.width * 0.60,
-          duration: const Duration(milliseconds: 300),
-          top: topOffset,
-          left: 25,
-          child: CustomPaint(
-            painter: BracketPainter(
-              isTopBracket: widget.columnIndex + 1 == widget.totalColumns
-                  ? null
-                  : !(matchIndex % 2 == 0),
-              showLeftBorder: widget.prevColumnIndex < widget.columnIndex,
-              lineColor: widget.controller.lineColor ?? Colors.black,
-              borderColor: widget.controller.borderColor ?? Colors.black,
-              lineWidth: widget.controller.lineWidth ?? 2.0,
-              borderWidth: widget.controller.borderWidth?.toDouble() ?? 2.0,
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(2.0),
-              child: cellWidget,
-            ),
-          ),
-        );
-      }).toList(),
+              widget.roundData.localScope.dataContext
+                  .addDataContextById(widget.roundData.matches.name, matchData);
+
+              final cellWidget = widget.roundData.localScope
+                  .buildWidgetFromDefinition(widget.roundData.matches.template);
+              return AnimatedContainer(
+                height: matchCardHeight,
+                width: MediaQuery.of(context).size.width * 0.6,
+                duration: const Duration(milliseconds: 300),
+                margin: EdgeInsets.only(
+                    top: topOffset, left: !isNextColumn ? 0 : 15),
+                child: CustomPaint(
+                  painter: BracketPainter(
+                    isTopBracket: widget.columnIndex + 1 == widget.totalColumns
+                        ? null
+                        : !(matchIndex % 2 == 0),
+                    showLeftBorder: widget.prevColumnIndex < widget.columnIndex,
+                    lineColor: widget.controller.lineColor ?? Colors.black,
+                    borderColor: widget.controller.borderColor ?? Colors.black,
+                    lineWidth: widget.controller.lineWidth ?? 2.0,
+                    borderWidth:
+                        widget.controller.borderWidth?.toDouble() ?? 2.0,
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(2.0),
+                    child: cellWidget,
+                  ),
+                ),
+              );
+            }),
+            if (isNextColumn) SizedBox(height: matchCardHeight),
+          ],
+        ),
+      ),
     );
   }
 }
